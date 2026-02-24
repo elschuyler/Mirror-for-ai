@@ -372,6 +372,96 @@ export default {
       return new Response(HOMEPAGE, { headers: { "Content-Type": "text/html" } });
     }
 
+    // OpenAI Plugin Manifest
+    if (path === "/.well-known/ai-plugin.json") {
+      const host = url.host;
+      const manifest = {
+        schema_version: "v1",
+        name_for_human: "Mirror for AI",
+        name_for_model: "mirror_for_ai",
+        description_for_human: "Read any public GitHub or Codeberg repository. List files, read file contents, and get AI-friendly summaries.",
+        description_for_model: "Use this plugin to read public GitHub and Codeberg repositories. You can list all files in a repo, read individual file contents as plain text, and get an AI-friendly llms.txt summary. Always start with the summary to understand the repo structure, then fetch individual files as needed. Supports github and codeberg platforms.",
+        auth: { type: "none" },
+        api: { type: "openapi", url: `https://${host}/openapi.json` },
+        contact_email: "support@example.com",
+        legal_info_url: `https://${host}`
+      };
+      return new Response(JSON.stringify(manifest, null, 2), {
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+      });
+    }
+
+    // OpenAPI Spec
+    if (path === "/openapi.json") {
+      const host = url.host;
+      const spec = {
+        openapi: "3.0.1",
+        info: {
+          title: "Mirror for AI",
+          description: "Read-only mirror of public GitHub and Codeberg repositories for AI tools.",
+          version: "1.0.0"
+        },
+        servers: [{ url: `https://${host}` }],
+        paths: {
+          "/{platform}/{owner}/{repo}": {
+            get: {
+              operationId: "listFiles",
+              summary: "List all files in a repository",
+              description: "Returns a plain text list of all files in the specified public repository.",
+              parameters: [
+                { name: "platform", in: "path", required: true, schema: { type: "string", enum: ["github", "codeberg"] }, description: "The platform hosting the repository" },
+                { name: "owner", in: "path", required: true, schema: { type: "string" }, description: "The repository owner" },
+                { name: "repo", in: "path", required: true, schema: { type: "string" }, description: "The repository name" }
+              ],
+              responses: {
+                "200": { description: "Plain text list of all files", content: { "text/plain": { schema: { type: "string" } } } },
+                "404": { description: "Repository not found" },
+                "429": { description: "Rate limit exceeded" }
+              }
+            }
+          },
+          "/{platform}/{owner}/{repo}/llms.txt": {
+            get: {
+              operationId: "getRepoSummary",
+              summary: "Get an AI-friendly summary of the repository",
+              description: "Returns a structured llms.txt summary including description, file counts, and categorized file links. Always call this first before reading individual files.",
+              parameters: [
+                { name: "platform", in: "path", required: true, schema: { type: "string", enum: ["github", "codeberg"] } },
+                { name: "owner", in: "path", required: true, schema: { type: "string" } },
+                { name: "repo", in: "path", required: true, schema: { type: "string" } }
+              ],
+              responses: {
+                "200": { description: "AI-friendly repo summary in llms.txt format", content: { "text/plain": { schema: { type: "string" } } } },
+                "404": { description: "Repository not found" },
+                "429": { description: "Rate limit exceeded" }
+              }
+            }
+          },
+          "/{platform}/{owner}/{repo}/{filePath}": {
+            get: {
+              operationId: "readFile",
+              summary: "Read a specific file from the repository",
+              description: "Returns the raw plain text contents of a specific file in the repository.",
+              parameters: [
+                { name: "platform", in: "path", required: true, schema: { type: "string", enum: ["github", "codeberg"] } },
+                { name: "owner", in: "path", required: true, schema: { type: "string" } },
+                { name: "repo", in: "path", required: true, schema: { type: "string" } },
+                { name: "filePath", in: "path", required: true, schema: { type: "string" }, description: "Path to the file within the repository" }
+              ],
+              responses: {
+                "200": { description: "Raw file contents as plain text", content: { "text/plain": { schema: { type: "string" } } } },
+                "404": { description: "File not found" },
+                "429": { description: "Rate limit exceeded" }
+              }
+            }
+          }
+        }
+      };
+      return new Response(JSON.stringify(spec, null, 2), {
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+      });
+    }
+
     // Root llms.txt — describes this service to AI tools
     if (path === "/llms.txt") {
       const host = url.host;
@@ -524,50 +614,89 @@ async function getFile(platform, owner, repo, filePath) {
 async function getLlmsTxt(platform, owner, repo, request) {
   const headers = { "User-Agent": "mirror-for-ai/1.0" };
   const host = new URL(request.url).host;
-  let files = [], description = "", defaultBranch = "main";
-  if (platform === "github") {
-    const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
-    if (!repoRes.ok) throw new Error(`Repo not found`);
-    const repoData = await repoRes.json();
-    description = repoData.description || "";
-    defaultBranch = repoData.default_branch || "main";
-    const treeRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`, { headers });
-    if (!treeRes.ok) throw new Error(`Could not fetch file tree`);
-    files = ((await treeRes.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
-  } else {
-    const repoRes = await fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}`, { headers });
-    if (!repoRes.ok) throw new Error(`Repo not found`);
-    const repoData = await repoRes.json();
-    description = repoData.description || "";
-    defaultBranch = repoData.default_branch || "main";
-    const branchRes = await fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/branches/${defaultBranch}`, { headers });
-    if (!branchRes.ok) throw new Error(`Branch not found`);
-    const sha = (await branchRes.json()).commit.id;
-    const treeRes = await fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/git/trees/${sha}?recursive=true`, { headers });
-    if (!treeRes.ok) throw new Error(`Could not fetch file tree`);
-    files = ((await treeRes.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
-  }
   const baseUrl = `https://${host}/${platform}/${owner}/${repo}`;
+  let files = [], description = "", defaultBranch = "main", totalFiles = 0;
+
+  const TIMEOUT_MS = 8000;
+  const FILE_CAP = 500;
+
+  const withTimeout = (promise) => Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), TIMEOUT_MS))
+  ]);
+
+  try {
+    if (platform === "github") {
+      const repoRes = await withTimeout(fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers }));
+      if (!repoRes.ok) throw new Error(`Repo not found`);
+      const repoData = await repoRes.json();
+      description = repoData.description || "";
+      defaultBranch = repoData.default_branch || "main";
+
+      const treeRes = await withTimeout(fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`, { headers }));
+      if (!treeRes.ok) throw new Error(`Could not fetch file tree`);
+      const allFiles = ((await treeRes.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
+      totalFiles = allFiles.length;
+      files = allFiles.slice(0, FILE_CAP);
+
+    } else {
+      const repoRes = await withTimeout(fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}`, { headers }));
+      if (!repoRes.ok) throw new Error(`Repo not found`);
+      const repoData = await repoRes.json();
+      description = repoData.description || "";
+      defaultBranch = repoData.default_branch || "main";
+
+      const branchRes = await withTimeout(fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/branches/${defaultBranch}`, { headers }));
+      if (!branchRes.ok) throw new Error(`Branch not found`);
+      const sha = (await branchRes.json()).commit.id;
+
+      const treeRes = await withTimeout(fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/git/trees/${sha}?recursive=true`, { headers }));
+      if (!treeRes.ok) throw new Error(`Could not fetch file tree`);
+      const allFiles = ((await treeRes.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
+      totalFiles = allFiles.length;
+      files = allFiles.slice(0, FILE_CAP);
+    }
+  } catch (e) {
+    // Return a minimal but useful response even on timeout
+    return new Response([
+      `# ${owner}/${repo}`,
+      description ? `> ${description}` : "",
+      ``,
+      `## Overview`,
+      `- Platform: ${platform}`,
+      `- Note: This is a large repository. File listing timed out.`,
+      ``,
+      `## How to read files`,
+      `${baseUrl}/path/to/file`,
+      ``,
+      `## Full file list`,
+      `${baseUrl}?view=files`,
+    ].filter(Boolean).join("\n"), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+  }
+
   const readmeFile = files.find(f => f.toLowerCase() === "readme.md" || f.toLowerCase() === "readme");
   const codeFiles = files.filter(f => /\.(js|ts|py|go|rs|java|cpp|c|cs|rb|php|swift|kt)$/.test(f));
   const configFiles = files.filter(f => /\.(json|toml|yaml|yml|ini|cfg)$/.test(f));
   const docFiles = files.filter(f => /\.(md|txt|rst)$/.test(f));
+  const truncated = totalFiles > FILE_CAP;
+
   return new Response([
     `# ${owner}/${repo}`,
     description ? `> ${description}` : "",
     ``,
     `## Overview`,
     `- Platform: ${platform}`,
-    `- Total files: ${files.length}`,
+    `- Total files: ${totalFiles}${truncated ? ` (showing first ${FILE_CAP})` : ""}`,
     `- Code files: ${codeFiles.length}`,
     `- Docs: ${docFiles.length}`,
+    truncated ? `- Full file list: ${baseUrl}?view=files` : "",
     ``,
     `## How to read files`,
     `${baseUrl}/path/to/file`,
     ``,
     readmeFile ? `## README\n${baseUrl}/${readmeFile}\n` : "",
     docFiles.length ? `## Documentation\n${docFiles.slice(0,20).map(f => `${baseUrl}/${f}`).join("\n")}\n` : "",
-    codeFiles.length ? `## Source Code\n${codeFiles.slice(0,50).map(f => `${baseUrl}/${f}`).join("\n")}\n` : "",
+    codeFiles.length ? `## Source Code (first 50)\n${codeFiles.slice(0,50).map(f => `${baseUrl}/${f}`).join("\n")}\n` : "",
     configFiles.length ? `## Config Files\n${configFiles.slice(0,10).map(f => `${baseUrl}/${f}`).join("\n")}\n` : "",
   ].filter(Boolean).join("\n"), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
 }
