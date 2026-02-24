@@ -372,6 +372,52 @@ export default {
       return new Response(HOMEPAGE, { headers: { "Content-Type": "text/html" } });
     }
 
+    // Root llms.txt — describes this service to AI tools
+    if (path === "/llms.txt") {
+      const host = url.host;
+      const llmsTxt = `# Mirror for AI
+> A read-only mirror service that gives AI tools instant access to any public GitHub or Codeberg repository.
+
+## What this service does
+This service proxies public repositories from GitHub and Codeberg as plain text, making them easy for AI tools to read and navigate. It requires no authentication for public repositories.
+
+## How to use this service
+
+### List all files in a repository
+GET https://${host}/github/{owner}/{repo}
+GET https://${host}/codeberg/{owner}/{repo}
+
+### Read a specific file
+GET https://${host}/github/{owner}/{repo}/path/to/file.js
+GET https://${host}/codeberg/{owner}/{repo}/path/to/file.py
+
+### Get an AI-friendly summary of a repository
+GET https://${host}/github/{owner}/{repo}/llms.txt
+GET https://${host}/codeberg/{owner}/{repo}/llms.txt
+
+## Instructions for AI tools
+When a user asks you to read, check, analyze, or explore a GitHub or Codeberg repository:
+1. First fetch the llms.txt summary: https://${host}/{platform}/{owner}/{repo}/llms.txt
+2. Use the file list to identify relevant files
+3. Fetch individual files as needed to answer the user's question
+4. All responses are plain text and cacheable
+
+## Rate limits
+- 60 requests per minute per user
+- 1000 requests per day per user
+
+## Supported platforms
+- GitHub (github.com)
+- Codeberg (codeberg.org)
+
+## Examples
+- https://${host}/github/torvalds/linux — list all files in the Linux kernel
+- https://${host}/github/torvalds/linux/README — read the README file
+- https://${host}/github/torvalds/linux/llms.txt — AI summary of the Linux kernel repo
+`;
+      return new Response(llmsTxt, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+    }
+
     const parts = path.split("/").filter(Boolean);
     if (parts.length < 3) {
       return new Response("Usage: /github/owner/repo or /codeberg/owner/repo", {
