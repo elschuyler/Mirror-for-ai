@@ -1,3 +1,41 @@
+// Rate limit settings
+const RATE_LIMIT_PER_MINUTE = 60;
+const RATE_LIMIT_PER_DAY = 1000;
+
+async function checkRateLimit(request) {
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  const now = new Date();
+  const minute = `${now.getUTCFullYear()}-${now.getUTCMonth()}-${now.getUTCDate()}-${now.getUTCHours()}-${now.getUTCMinutes()}`;
+  const day = `${now.getUTCFullYear()}-${now.getUTCMonth()}-${now.getUTCDate()}`;
+
+  const cache = caches.default;
+  const minuteKey = new Request(`https://rate-limit-store/minute/${ip}/${minute}`);
+  const dayKey = new Request(`https://rate-limit-store/day/${ip}/${day}`);
+
+  const [minuteRes, dayRes] = await Promise.all([cache.match(minuteKey), cache.match(dayKey)]);
+  const minuteCount = minuteRes ? parseInt(await minuteRes.text()) : 0;
+  const dayCount = dayRes ? parseInt(await dayRes.text()) : 0;
+
+  if (minuteCount >= RATE_LIMIT_PER_MINUTE) {
+    return { limited: true, reason: `Rate limit exceeded: max ${RATE_LIMIT_PER_MINUTE} requests per minute.` };
+  }
+  if (dayCount >= RATE_LIMIT_PER_DAY) {
+    return { limited: true, reason: `Rate limit exceeded: max ${RATE_LIMIT_PER_DAY} requests per day.` };
+  }
+
+  // Increment counters
+  await Promise.all([
+    cache.put(minuteKey, new Response(String(minuteCount + 1), {
+      headers: { "Cache-Control": "public, max-age=60" }
+    })),
+    cache.put(dayKey, new Response(String(dayCount + 1), {
+      headers: { "Cache-Control": "public, max-age=86400" }
+    }))
+  ]);
+
+  return { limited: false };
+}
+
 const HOMEPAGE = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -58,8 +96,6 @@ const HOMEPAGE = `<!DOCTYPE html>
   .stat { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; text-align: center; }
   .stat-val { font-size: 26px; font-weight: 700; background: linear-gradient(135deg, var(--a), var(--b)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 4px; }
   .stat-label { font-size: 11px; color: var(--muted); }
-
-  /* BOOKMARKS */
   .bookmarks-section { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 32px; margin-bottom: 48px; }
   .bookmarks-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
   .bookmarks-header h2 { font-size: 18px; font-weight: 700; background: linear-gradient(90deg, var(--a), var(--b)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
@@ -79,7 +115,6 @@ const HOMEPAGE = `<!DOCTYPE html>
   .btn-remove { background: rgba(255,255,255,0.06); color: var(--muted); border: 1px solid var(--border); }
   .btn-remove:hover { color: #ff6b6b; border-color: rgba(255,107,107,0.4); }
   .btn-sm:hover { opacity: 0.85; }
-
   footer { position: relative; z-index: 10; border-top: 1px solid var(--border); padding: 20px 40px; display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); font-family: 'Fira Code', monospace; }
   @media (max-width: 700px) {
     main { padding: 48px 20px; } nav, footer { padding: 16px 20px; }
@@ -105,7 +140,6 @@ const HOMEPAGE = `<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- BOOKMARKS -->
   <div class="section-label" style="margin-bottom:16px;">// saved repos</div>
   <div class="bookmarks-section">
     <div class="bookmarks-header">
@@ -183,15 +217,13 @@ const HOMEPAGE = `<!DOCTYPE html>
 </main>
 <footer>
   <span>mirror-for-ai — cloudflare workers</span>
-  <span>read only · always free</span>
+  <span>60 req/min · 1000 req/day per user</span>
 </footer>
 <script>
 function getBookmarks() {
   try { return JSON.parse(localStorage.getItem('mirror-bookmarks') || '[]'); } catch { return []; }
 }
-function saveBookmarks(bm) {
-  localStorage.setItem('mirror-bookmarks', JSON.stringify(bm));
-}
+function saveBookmarks(bm) { localStorage.setItem('mirror-bookmarks', JSON.stringify(bm)); }
 function addBookmark(platform, owner, repo) {
   const bm = getBookmarks();
   const key = platform + '/' + owner + '/' + repo;
@@ -268,7 +300,7 @@ const REPO_PAGE = (platform, owner, repo, host) => `<!DOCTYPE html>
   .ac { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; cursor: pointer; transition: border-color 0.2s, transform 0.15s; text-decoration: none; display: block; }
   .ac:hover { border-color: rgba(255,255,255,0.2); transform: translateY(-2px); }
   .ac-icon { font-size: 22px; margin-bottom: 10px; }
-  .ac-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .ac-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; color: var(--text); }
   .ac-desc { font-size: 11px; color: var(--muted); font-weight: 300; }
   footer { position: relative; z-index: 10; border-top: 1px solid var(--border); padding: 20px 40px; font-size: 11px; color: var(--muted); font-family: 'Fira Code', monospace; }
   @media (max-width: 700px) { main { padding: 32px 20px; } nav, footer { padding: 16px 20px; } .action-cards { grid-template-columns: 1fr; } .repo-title { display: none; } }
@@ -321,11 +353,8 @@ function updateBtn() {
 }
 function toggleSave() {
   let bm = getBookmarks();
-  if (isSaved()) {
-    bm = bm.filter(b => b.key !== KEY);
-  } else {
-    bm.unshift({ key: KEY, platform: PLATFORM, owner: OWNER, repo: REPO, date: new Date().toLocaleDateString() });
-  }
+  if (isSaved()) { bm = bm.filter(b => b.key !== KEY); }
+  else { bm.unshift({ key: KEY, platform: PLATFORM, owner: OWNER, repo: REPO, date: new Date().toLocaleDateString() }); }
   localStorage.setItem('mirror-bookmarks', JSON.stringify(bm));
   updateBtn();
 }
@@ -357,12 +386,22 @@ export default {
       });
     }
 
+    // Rate limit check
+    const rateCheck = await checkRateLimit(request);
+    if (rateCheck.limited) {
+      return new Response(`429 Too Many Requests\n\n${rateCheck.reason}\n\nPlease slow down and try again shortly.`, {
+        status: 429,
+        headers: {
+          "Content-Type": "text/plain",
+          "Retry-After": "60"
+        }
+      });
+    }
+
     const filePath = rest.join("/");
 
-    // Show repo landing page when no file path and no ?view=files
     if (!filePath && !url.searchParams.has("view")) {
-      const host = url.host;
-      return new Response(REPO_PAGE(platform, owner, repo, host), {
+      return new Response(REPO_PAGE(platform, owner, repo, url.host), {
         headers: { "Content-Type": "text/html" }
       });
     }
@@ -397,12 +436,10 @@ export default {
 async function listFiles(platform, owner, repo, request) {
   const headers = { "User-Agent": "mirror-for-ai/1.0" };
   let files = [];
-
   if (platform === "github") {
     const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`, { headers });
     if (!res.ok) throw new Error(`Repo not found or private (status ${res.status})`);
-    const data = await res.json();
-    files = (data.tree || []).filter(f => f.type === "blob").map(f => f.path);
+    files = ((await res.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
   } else {
     const repoRes = await fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}`, { headers });
     if (!repoRes.ok) throw new Error(`Repo not found (status ${repoRes.status})`);
@@ -414,17 +451,14 @@ async function listFiles(platform, owner, repo, request) {
     if (!treeRes.ok) throw new Error(`Could not fetch file tree`);
     files = ((await treeRes.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
   }
-
   const host = new URL(request.url).host;
-  const output = [
+  return new Response([
     `# ${platform}/${owner}/${repo}`,
     `# ${files.length} files found`,
     `# To read a file: https://${host}/${platform}/${owner}/${repo}/path/to/file`,
     `# AI summary: https://${host}/${platform}/${owner}/${repo}/llms.txt`,
     ``, ...files
-  ].join("\n");
-
-  return new Response(output, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+  ].join("\n"), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
 }
 
 async function getFile(platform, owner, repo, filePath) {
@@ -445,7 +479,6 @@ async function getLlmsTxt(platform, owner, repo, request) {
   const headers = { "User-Agent": "mirror-for-ai/1.0" };
   const host = new URL(request.url).host;
   let files = [], description = "", defaultBranch = "main";
-
   if (platform === "github") {
     const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers });
     if (!repoRes.ok) throw new Error(`Repo not found`);
@@ -468,14 +501,12 @@ async function getLlmsTxt(platform, owner, repo, request) {
     if (!treeRes.ok) throw new Error(`Could not fetch file tree`);
     files = ((await treeRes.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
   }
-
   const baseUrl = `https://${host}/${platform}/${owner}/${repo}`;
   const readmeFile = files.find(f => f.toLowerCase() === "readme.md" || f.toLowerCase() === "readme");
   const codeFiles = files.filter(f => /\.(js|ts|py|go|rs|java|cpp|c|cs|rb|php|swift|kt)$/.test(f));
   const configFiles = files.filter(f => /\.(json|toml|yaml|yml|ini|cfg)$/.test(f));
   const docFiles = files.filter(f => /\.(md|txt|rst)$/.test(f));
-
-  const output = [
+  return new Response([
     `# ${owner}/${repo}`,
     description ? `> ${description}` : "",
     ``,
@@ -492,7 +523,5 @@ async function getLlmsTxt(platform, owner, repo, request) {
     docFiles.length ? `## Documentation\n${docFiles.slice(0,20).map(f => `${baseUrl}/${f}`).join("\n")}\n` : "",
     codeFiles.length ? `## Source Code\n${codeFiles.slice(0,50).map(f => `${baseUrl}/${f}`).join("\n")}\n` : "",
     configFiles.length ? `## Config Files\n${configFiles.slice(0,10).map(f => `${baseUrl}/${f}`).join("\n")}\n` : "",
-  ].filter(Boolean).join("\n");
-
-  return new Response(output, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+  ].filter(Boolean).join("\n"), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
 }
