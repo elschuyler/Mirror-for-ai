@@ -54,15 +54,38 @@ const HOMEPAGE = `<!DOCTYPE html>
   .code-block-title { font-family: 'Fira Code', monospace; font-size: 10px; color: var(--muted); letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 12px; }
   .code-line { font-family: 'Fira Code', monospace; font-size: 12px; line-height: 2; color: var(--muted); }
   .code-line .hl { color: var(--b); } .code-line .hl2 { color: var(--c); } .code-line .comment { color: rgba(255,255,255,0.2); }
-  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 56px; }
   .stat { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; text-align: center; }
   .stat-val { font-size: 26px; font-weight: 700; background: linear-gradient(135deg, var(--a), var(--b)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 4px; }
   .stat-label { font-size: 11px; color: var(--muted); }
+
+  /* BOOKMARKS */
+  .bookmarks-section { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 32px; margin-bottom: 48px; }
+  .bookmarks-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+  .bookmarks-header h2 { font-size: 18px; font-weight: 700; background: linear-gradient(90deg, var(--a), var(--b)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+  .bookmarks-empty { font-family: 'Fira Code', monospace; font-size: 12px; color: var(--muted); text-align: center; padding: 24px 0; }
+  .bookmark-list { display: flex; flex-direction: column; gap: 10px; }
+  .bookmark-item { display: flex; align-items: center; gap: 12px; background: rgba(0,0,0,0.2); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; transition: border-color 0.2s; }
+  .bookmark-item:hover { border-color: rgba(255,255,255,0.15); }
+  .bookmark-platform { font-family: 'Fira Code', monospace; font-size: 10px; padding: 3px 8px; border-radius: 4px; font-weight: 400; flex-shrink: 0; }
+  .platform-github { background: rgba(167,139,250,0.15); color: var(--a); border: 1px solid rgba(167,139,250,0.3); }
+  .platform-codeberg { background: rgba(56,189,248,0.15); color: var(--b); border: 1px solid rgba(56,189,248,0.3); }
+  .bookmark-name { font-size: 13px; font-weight: 500; flex: 1; cursor: pointer; }
+  .bookmark-name:hover { color: var(--b); }
+  .bookmark-date { font-family: 'Fira Code', monospace; font-size: 10px; color: var(--muted); flex-shrink: 0; }
+  .bookmark-actions { display: flex; gap: 8px; flex-shrink: 0; }
+  .btn-sm { border: none; border-radius: 6px; padding: 6px 12px; font-family: 'Space Grotesk', sans-serif; font-size: 11px; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
+  .btn-visit { background: linear-gradient(135deg, var(--a), var(--b)); color: #000; }
+  .btn-remove { background: rgba(255,255,255,0.06); color: var(--muted); border: 1px solid var(--border); }
+  .btn-remove:hover { color: #ff6b6b; border-color: rgba(255,107,107,0.4); }
+  .btn-sm:hover { opacity: 0.85; }
+
   footer { position: relative; z-index: 10; border-top: 1px solid var(--border); padding: 20px 40px; display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); font-family: 'Fira Code', monospace; }
   @media (max-width: 700px) {
     main { padding: 48px 20px; } nav, footer { padding: 16px 20px; }
     .endpoints { grid-template-columns: 1fr; } .stats { grid-template-columns: repeat(2, 1fr); }
-    .how-to { padding: 24px; } footer { flex-direction: column; gap: 8px; }
+    .how-to, .bookmarks-section { padding: 24px; } footer { flex-direction: column; gap: 8px; }
+    .bookmark-date { display: none; }
   }
 </style>
 </head>
@@ -81,6 +104,16 @@ const HOMEPAGE = `<!DOCTYPE html>
       <button onclick="goToRepo()">Explore →</button>
     </div>
   </div>
+
+  <!-- BOOKMARKS -->
+  <div class="section-label" style="margin-bottom:16px;">// saved repos</div>
+  <div class="bookmarks-section">
+    <div class="bookmarks-header">
+      <h2>🔖 Saved Repos</h2>
+    </div>
+    <div id="bookmarkList"><div class="bookmarks-empty">No saved repos yet. Visit a repo and click Save to bookmark it.</div></div>
+  </div>
+
   <div class="section-label" style="margin-bottom:16px;">// endpoints</div>
   <div class="endpoints">
     <div class="ep">
@@ -102,6 +135,7 @@ const HOMEPAGE = `<!DOCTYPE html>
       <div class="ep-desc">AI-friendly overview with categorized file links</div>
     </div>
   </div>
+
   <div class="how-to">
     <h2>How to use</h2>
     <div class="steps">
@@ -138,6 +172,7 @@ const HOMEPAGE = `<!DOCTYPE html>
       <div class="code-line"><span class="hl">mirror-for-ai.vialewis31.workers.dev</span>/github/torvalds/linux<span class="hl2">/llms.txt</span></div>
     </div>
   </div>
+
   <div class="section-label" style="margin-bottom:16px;">// stats</div>
   <div class="stats">
     <div class="stat"><div class="stat-val">2</div><div class="stat-label">Platforms</div></div>
@@ -151,6 +186,43 @@ const HOMEPAGE = `<!DOCTYPE html>
   <span>read only · always free</span>
 </footer>
 <script>
+function getBookmarks() {
+  try { return JSON.parse(localStorage.getItem('mirror-bookmarks') || '[]'); } catch { return []; }
+}
+function saveBookmarks(bm) {
+  localStorage.setItem('mirror-bookmarks', JSON.stringify(bm));
+}
+function addBookmark(platform, owner, repo) {
+  const bm = getBookmarks();
+  const key = platform + '/' + owner + '/' + repo;
+  if (bm.find(b => b.key === key)) return;
+  bm.unshift({ key, platform, owner, repo, date: new Date().toLocaleDateString() });
+  saveBookmarks(bm);
+  renderBookmarks();
+}
+function removeBookmark(key) {
+  saveBookmarks(getBookmarks().filter(b => b.key !== key));
+  renderBookmarks();
+}
+function renderBookmarks() {
+  const bm = getBookmarks();
+  const el = document.getElementById('bookmarkList');
+  if (!bm.length) {
+    el.innerHTML = '<div class="bookmarks-empty">No saved repos yet. Visit a repo and click Save to bookmark it.</div>';
+    return;
+  }
+  el.innerHTML = '<div class="bookmark-list">' + bm.map(b => \`
+    <div class="bookmark-item">
+      <span class="bookmark-platform platform-\${b.platform}">\${b.platform}</span>
+      <span class="bookmark-name" onclick="window.location.href='/\${b.key}'">\${b.owner}/\${b.repo}</span>
+      <span class="bookmark-date">\${b.date}</span>
+      <div class="bookmark-actions">
+        <button class="btn-sm btn-visit" onclick="window.location.href='/\${b.key}'">Visit</button>
+        <button class="btn-sm btn-remove" onclick="removeBookmark('\${b.key}')">Remove</button>
+      </div>
+    </div>
+  \`).join('') + '</div>';
+}
 function goToRepo() {
   const val = document.getElementById('repoInput').value.trim();
   if (val) window.location.href = '/' + val;
@@ -158,6 +230,106 @@ function goToRepo() {
 document.getElementById('repoInput').addEventListener('keydown', e => {
   if (e.key === 'Enter') goToRepo();
 });
+renderBookmarks();
+</script>
+</body>
+</html>`;
+
+const REPO_PAGE = (platform, owner, repo, host) => `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${owner}/${repo} — Mirror for AI</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Fira+Code:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root { --bg: #06060e; --card: rgba(255,255,255,0.04); --border: rgba(255,255,255,0.08); --text: #e8e8f0; --muted: rgba(255,255,255,0.35); --a: #a78bfa; --b: #38bdf8; --c: #34d399; }
+  body { background: var(--bg); color: var(--text); font-family: 'Space Grotesk', sans-serif; min-height: 100vh; }
+  body::before { content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 0; background: radial-gradient(ellipse 60% 40% at 0% 0%, rgba(167,139,250,0.10) 0%, transparent 70%), radial-gradient(ellipse 50% 40% at 100% 60%, rgba(56,189,248,0.08) 0%, transparent 70%); }
+  nav { position: relative; z-index: 10; padding: 20px 40px; display: flex; align-items: center; gap: 16px; border-bottom: 1px solid var(--border); }
+  .logo { font-size: 16px; font-weight: 700; background: linear-gradient(90deg, var(--a), var(--b)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; text-decoration: none; }
+  .sep { color: var(--border); font-size: 18px; }
+  .repo-title { font-size: 14px; font-weight: 500; color: var(--muted); }
+  .nav-actions { margin-left: auto; display: flex; gap: 10px; align-items: center; }
+  .btn { border: none; border-radius: 8px; padding: 8px 16px; font-family: 'Space Grotesk', sans-serif; font-size: 12px; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
+  .btn-save { background: linear-gradient(135deg, var(--a), var(--b)); color: #000; }
+  .btn-saved { background: rgba(52,211,153,0.15); color: var(--c); border: 1px solid rgba(52,211,153,0.3); }
+  .btn-home { background: var(--card); color: var(--muted); border: 1px solid var(--border); }
+  .btn:hover { opacity: 0.85; }
+  main { position: relative; z-index: 10; max-width: 920px; margin: 0 auto; padding: 48px 40px; }
+  .repo-header { margin-bottom: 40px; }
+  .platform-badge { display: inline-block; font-family: 'Fira Code', monospace; font-size: 10px; padding: 3px 10px; border-radius: 4px; margin-bottom: 16px; }
+  .platform-github { background: rgba(167,139,250,0.15); color: var(--a); border: 1px solid rgba(167,139,250,0.3); }
+  .platform-codeberg { background: rgba(56,189,248,0.15); color: var(--b); border: 1px solid rgba(56,189,248,0.3); }
+  h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+  .repo-desc { font-size: 14px; color: var(--muted); font-weight: 300; }
+  .action-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 40px; }
+  .ac { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; cursor: pointer; transition: border-color 0.2s, transform 0.15s; text-decoration: none; display: block; }
+  .ac:hover { border-color: rgba(255,255,255,0.2); transform: translateY(-2px); }
+  .ac-icon { font-size: 22px; margin-bottom: 10px; }
+  .ac-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .ac-desc { font-size: 11px; color: var(--muted); font-weight: 300; }
+  footer { position: relative; z-index: 10; border-top: 1px solid var(--border); padding: 20px 40px; font-size: 11px; color: var(--muted); font-family: 'Fira Code', monospace; }
+  @media (max-width: 700px) { main { padding: 32px 20px; } nav, footer { padding: 16px 20px; } .action-cards { grid-template-columns: 1fr; } .repo-title { display: none; } }
+</style>
+</head>
+<body>
+<nav>
+  <a href="/" class="logo">mirror.ai</a>
+  <span class="sep">/</span>
+  <span class="repo-title">${owner}/${repo}</span>
+  <div class="nav-actions">
+    <button class="btn btn-home" onclick="window.location.href='/'">← Home</button>
+    <button class="btn btn-save" id="saveBtn" onclick="toggleSave()">🔖 Save</button>
+  </div>
+</nav>
+<main>
+  <div class="repo-header">
+    <div class="platform-badge platform-${platform}">${platform}</div>
+    <h1>${owner}/${repo}</h1>
+    <p class="repo-desc">Public repository mirror — read only</p>
+  </div>
+  <div class="action-cards">
+    <a class="ac" href="/${platform}/${owner}/${repo}?view=files">
+      <div class="ac-icon">📂</div>
+      <div class="ac-title">Browse Files</div>
+      <div class="ac-desc">View the complete file tree of this repository</div>
+    </a>
+    <a class="ac" href="/${platform}/${owner}/${repo}/llms.txt">
+      <div class="ac-icon">🤖</div>
+      <div class="ac-title">llms.txt</div>
+      <div class="ac-desc">AI-friendly summary with categorized file links</div>
+    </a>
+    <a class="ac" href="https://${platform === 'github' ? 'github.com' : 'codeberg.org'}/${owner}/${repo}" target="_blank">
+      <div class="ac-icon">↗</div>
+      <div class="ac-title">Original Repo</div>
+      <div class="ac-desc">Open the original repository on ${platform}</div>
+    </a>
+  </div>
+</main>
+<footer>mirror-for-ai — ${platform}/${owner}/${repo}</footer>
+<script>
+const PLATFORM = '${platform}', OWNER = '${owner}', REPO = '${repo}';
+const KEY = PLATFORM + '/' + OWNER + '/' + REPO;
+function getBookmarks() { try { return JSON.parse(localStorage.getItem('mirror-bookmarks') || '[]'); } catch { return []; } }
+function isSaved() { return getBookmarks().some(b => b.key === KEY); }
+function updateBtn() {
+  const btn = document.getElementById('saveBtn');
+  if (isSaved()) { btn.textContent = '✓ Saved'; btn.className = 'btn btn-saved'; }
+  else { btn.textContent = '🔖 Save'; btn.className = 'btn btn-save'; }
+}
+function toggleSave() {
+  let bm = getBookmarks();
+  if (isSaved()) {
+    bm = bm.filter(b => b.key !== KEY);
+  } else {
+    bm.unshift({ key: KEY, platform: PLATFORM, owner: OWNER, repo: REPO, date: new Date().toLocaleDateString() });
+  }
+  localStorage.setItem('mirror-bookmarks', JSON.stringify(bm));
+  updateBtn();
+}
+updateBtn();
 </script>
 </body>
 </html>`;
@@ -187,6 +359,14 @@ export default {
 
     const filePath = rest.join("/");
 
+    // Show repo landing page when no file path and no ?view=files
+    if (!filePath && !url.searchParams.has("view")) {
+      const host = url.host;
+      return new Response(REPO_PAGE(platform, owner, repo, host), {
+        headers: { "Content-Type": "text/html" }
+      });
+    }
+
     const cacheKey = new Request(url.toString(), request);
     const cache = caches.default;
     const cachedResponse = await cache.match(cacheKey);
@@ -194,7 +374,7 @@ export default {
 
     try {
       let response;
-      if (!filePath) {
+      if (!filePath || url.searchParams.get("view") === "files") {
         response = await listFiles(platform, owner, repo, request);
       } else if (filePath === "llms.txt") {
         response = await getLlmsTxt(platform, owner, repo, request);
