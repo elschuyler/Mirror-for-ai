@@ -372,6 +372,138 @@ export default {
       return new Response(HOMEPAGE, { headers: { "Content-Type": "text/html" } });
     }
 
+    // MCP (Model Context Protocol) endpoint
+    if (path === "/mcp") {
+      // Handle CORS preflight
+      if (request.method === "OPTIONS") {
+        return new Response(null, {
+          headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type"
+          }
+        });
+      }
+
+      const host = url.host;
+
+      // GET /mcp — server info
+      if (request.method === "GET") {
+        return new Response(JSON.stringify({
+          name: "mirror-for-ai",
+          version: "1.0.0",
+          description: "Read-only mirror of public GitHub and Codeberg repositories",
+          protocol: "mcp/1.0"
+        }, null, 2), {
+          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+        });
+      }
+
+      // POST /mcp — handle JSON-RPC tool calls
+      if (request.method === "POST") {
+        let body;
+        try { body = await request.json(); } catch {
+          return mcpError(-32700, "Parse error", null);
+        }
+
+        const { method, params, id } = body;
+
+        // List available tools
+        if (method === "tools/list") {
+          return mcpResult({
+            tools: [
+              {
+                name: "list_files",
+                description: "List all files in a public GitHub or Codeberg repository",
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    platform: { type: "string", enum: ["github", "codeberg"], description: "The platform hosting the repo" },
+                    owner: { type: "string", description: "Repository owner or organization" },
+                    repo: { type: "string", description: "Repository name" }
+                  },
+                  required: ["platform", "owner", "repo"]
+                }
+              },
+              {
+                name: "read_file",
+                description: "Read the contents of a specific file in a public repository",
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    platform: { type: "string", enum: ["github", "codeberg"] },
+                    owner: { type: "string" },
+                    repo: { type: "string" },
+                    path: { type: "string", description: "Path to the file within the repository" }
+                  },
+                  required: ["platform", "owner", "repo", "path"]
+                }
+              },
+              {
+                name: "get_summary",
+                description: "Get an AI-friendly llms.txt summary of a repository. Always call this first to understand the repo structure before reading individual files.",
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    platform: { type: "string", enum: ["github", "codeberg"] },
+                    owner: { type: "string" },
+                    repo: { type: "string" }
+                  },
+                  required: ["platform", "owner", "repo"]
+                }
+              }
+            ]
+          }, id);
+        }
+
+        // Call a tool
+        if (method === "tools/call") {
+          const { name, arguments: args } = params || {};
+
+          try {
+            let text;
+            const fakeRequest = new Request(`https://${host}/${args.platform}/${args.owner}/${args.repo}`);
+
+            if (name === "list_files") {
+              const res = await listFiles(args.platform, args.owner, args.repo, fakeRequest);
+              text = await res.text();
+            } else if (name === "get_summary") {
+              const res = await getLlmsTxt(args.platform, args.owner, args.repo, fakeRequest);
+              text = await res.text();
+            } else if (name === "read_file") {
+              const res = await getFile(args.platform, args.owner, args.repo, args.path);
+              text = await res.text();
+            } else {
+              return mcpError(-32601, `Unknown tool: ${name}`, id);
+            }
+
+            return mcpResult({
+              content: [{ type: "text", text }]
+            }, id);
+
+          } catch (e) {
+            return mcpResult({
+              content: [{ type: "text", text: `Error: ${e.message}` }],
+              isError: true
+            }, id);
+          }
+        }
+
+        // Initialize handshake
+        if (method === "initialize") {
+          return mcpResult({
+            protocolVersion: "2024-11-05",
+            capabilities: { tools: {} },
+            serverInfo: { name: "mirror-for-ai", version: "1.0.0" }
+          }, id);
+        }
+
+        return mcpError(-32601, "Method not found", id);
+      }
+
+      return new Response("Method not allowed", { status: 405 });
+    }
+
     // OpenAI Plugin Manifest
     if (path === "/.well-known/ai-plugin.json") {
       const host = url.host;
@@ -699,4 +831,17 @@ async function getLlmsTxt(platform, owner, repo, request) {
     codeFiles.length ? `## Source Code (first 50)\n${codeFiles.slice(0,50).map(f => `${baseUrl}/${f}`).join("\n")}\n` : "",
     configFiles.length ? `## Config Files\n${configFiles.slice(0,10).map(f => `${baseUrl}/${f}`).join("\n")}\n` : "",
   ].filter(Boolean).join("\n"), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+}
+
+function mcpResult(result, id) {
+  return new Response(JSON.stringify({ jsonrpc: "2.0", result, id }), {
+    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+  });
+}
+
+function mcpError(code, message, id) {
+  return new Response(JSON.stringify({ jsonrpc: "2.0", error: { code, message }, id }), {
+    status: 400,
+    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+  });
 }
