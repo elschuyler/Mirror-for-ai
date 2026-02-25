@@ -440,8 +440,8 @@ export default {
                 }
               },
               {
-                name: "get_summary",
-                description: "Get an AI-friendly llms.txt summary of a repository. Always call this first to understand the repo structure before reading individual files.",
+                name: "get_context",
+                description: "Get full context of a repository including file tree and contents of the most important files (README, entry points, config, source files). Use this for deep understanding of a repo without fetching files one by one.",
                 inputSchema: {
                   type: "object",
                   properties: {
@@ -469,6 +469,9 @@ export default {
               text = await res.text();
             } else if (name === "get_summary") {
               const res = await getLlmsTxt(args.platform, args.owner, args.repo, fakeRequest);
+              text = await res.text();
+            } else if (name === "get_context") {
+              const res = await getContext(args.platform, args.owner, args.repo, fakeRequest);
               text = await res.text();
             } else if (name === "read_file") {
               const res = await getFile(args.platform, args.owner, args.repo, args.path);
@@ -674,10 +677,22 @@ When a user asks you to read, check, analyze, or explore a GitHub or Codeberg re
       });
     }
 
-    const cacheKey = new Request(url.toString(), request);
-    const cache = caches.default;
-    const cachedResponse = await cache.match(cacheKey);
-    if (cachedResponse) return cachedResponse;
+    // Context endpoint - smart summary with file previews
+    if (filePath === "context") {
+      const cacheKey = new Request(url.toString(), request);
+      const cache = caches.default;
+      const cachedResponse = await cache.match(cacheKey);
+      if (cachedResponse) return cachedResponse;
+
+      const response = await getContext(platform, owner, repo, request);
+      const headers = new Headers(response.headers);
+      headers.set("Cache-Control", "public, max-age=300");
+      const cachedRes = new Response(response.clone().body, { status: response.status, headers });
+      ctx.waitUntil(cache.put(cacheKey, cachedRes));
+      return response;
+    }
+
+    
 
     try {
       let response;
@@ -743,6 +758,114 @@ async function getFile(platform, owner, repo, filePath) {
   }
 }
 
+async function getContext(platform, owner, repo, request) {
+  const headers = { "User-Agent": "mirror-for-ai/1.0" };
+  const host = new URL(request.url).host;
+  const baseUrl = `https://${host}/${platform}/${owner}/${repo}`;
+  let files = [], description = "", defaultBranch = "main";
+
+  const TIMEOUT_MS = 8000;
+  const withTimeout = (p) => Promise.race([p, new Promise((_, r) => setTimeout(() => r(new Error("timeout")), TIMEOUT_MS))]);
+
+  // Fetch repo info and file tree
+  try {
+    if (platform === "github") {
+      const repoRes = await withTimeout(fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers }));
+      if (!repoRes.ok) throw new Error(`Repo not found`);
+      const repoData = await repoRes.json();
+      description = repoData.description || "";
+      defaultBranch = repoData.default_branch || "main";
+      const treeRes = await withTimeout(fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`, { headers }));
+      if (!treeRes.ok) throw new Error(`Could not fetch file tree`);
+      files = ((await treeRes.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
+    } else {
+      const repoRes = await withTimeout(fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}`, { headers }));
+      if (!repoRes.ok) throw new Error(`Repo not found`);
+      const repoData = await repoRes.json();
+      description = repoData.description || "";
+      defaultBranch = repoData.default_branch || "main";
+      const branchRes = await withTimeout(fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/branches/${defaultBranch}`, { headers }));
+      const sha = (await branchRes.json()).commit.id;
+      const treeRes = await withTimeout(fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/git/trees/${sha}?recursive=true`, { headers }));
+      files = ((await treeRes.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
+    }
+  } catch (e) {
+    return new Response(`Error fetching repo: ${e.message}`, { status: 500, headers: { "Content-Type": "text/plain" } });
+  }
+
+  // Pick the most important files
+  const readme = files.find(f => /^readme(\.(md|txt|rst))?$/i.test(f));
+  const entryPoints = files.filter(f => /^(index|main|app|server|src\/index|src\/main|src\/app)\.(js|ts|py|go|rs|rb|php)$/.test(f));
+  const configFiles = files.filter(f => /^(package\.json|pyproject\.toml|Cargo\.toml|go\.mod|composer\.json|Gemfile|requirements\.txt|wrangler\.toml)$/.test(f));
+  const codeFiles = files.filter(f => /\.(js|ts|py|go|rs|java|cpp|c|cs|rb|php|swift|kt)$/.test(f) && !f.includes("node_modules") && !f.includes("vendor"));
+  const docFiles = files.filter(f => /\.(md|txt|rst)$/.test(f) && f !== readme);
+
+  // Priority order for fetching content
+  const toFetch = [
+    readme,
+    ...entryPoints,
+    ...configFiles,
+    ...codeFiles.slice(0, 8),
+    ...docFiles.slice(0, 3)
+  ].filter(Boolean).slice(0, 15); // max 15 files
+
+  // Fetch file contents in parallel
+  const fetchFile = async (filePath) => {
+    try {
+      let res;
+      if (platform === "github") {
+        res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`,
+          { headers: { ...headers, "Accept": "application/vnd.github.raw+json" } });
+      } else {
+        res = await fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw/${filePath}`, { headers });
+      }
+      if (!res.ok) return null;
+      const text = await res.text();
+      // Limit each file to first 100 lines
+      const lines = text.split("\n").slice(0, 100).join("\n");
+      const truncated = text.split("\n").length > 100;
+      return { path: filePath, content: lines, truncated };
+    } catch {
+      return null;
+    }
+  };
+
+  const fileContents = await Promise.all(toFetch.map(fetchFile));
+
+  // Build context document
+  const sections = [
+    `# ${owner}/${repo} — Full Context`,
+    description ? `> ${description}` : "",
+    ``,
+    `## Repository Overview`,
+    `- Platform: ${platform}`,
+    `- Total files: ${files.length}`,
+    `- Entry points: ${entryPoints.length}`,
+    `- Source files: ${codeFiles.length}`,
+    ``,
+    `## Complete File List`,
+    files.join("\n"),
+    ``,
+    `## File Contents`,
+    `> The most important files are included below. For other files use: ${baseUrl}/path/to/file`,
+    ``,
+  ];
+
+  for (const file of fileContents) {
+    if (!file) continue;
+    sections.push(`### ${file.path}`);
+    sections.push(`\`\`\``);
+    sections.push(file.content);
+    if (file.truncated) sections.push(`... (truncated, full file at ${baseUrl}/${file.path})`);
+    sections.push(`\`\`\``);
+    sections.push(``);
+  }
+
+  return new Response(sections.filter(s => s !== null).join("\n"), {
+    headers: { "Content-Type": "text/plain; charset=utf-8" }
+  });
+}
+
 async function getLlmsTxt(platform, owner, repo, request) {
   const headers = { "User-Agent": "mirror-for-ai/1.0" };
   const host = new URL(request.url).host;
@@ -764,24 +887,20 @@ async function getLlmsTxt(platform, owner, repo, request) {
       const repoData = await repoRes.json();
       description = repoData.description || "";
       defaultBranch = repoData.default_branch || "main";
-
       const treeRes = await withTimeout(fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`, { headers }));
       if (!treeRes.ok) throw new Error(`Could not fetch file tree`);
       const allFiles = ((await treeRes.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
       totalFiles = allFiles.length;
       files = allFiles.slice(0, FILE_CAP);
-
     } else {
       const repoRes = await withTimeout(fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}`, { headers }));
       if (!repoRes.ok) throw new Error(`Repo not found`);
       const repoData = await repoRes.json();
       description = repoData.description || "";
       defaultBranch = repoData.default_branch || "main";
-
       const branchRes = await withTimeout(fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/branches/${defaultBranch}`, { headers }));
       if (!branchRes.ok) throw new Error(`Branch not found`);
       const sha = (await branchRes.json()).commit.id;
-
       const treeRes = await withTimeout(fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/git/trees/${sha}?recursive=true`, { headers }));
       if (!treeRes.ok) throw new Error(`Could not fetch file tree`);
       const allFiles = ((await treeRes.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
@@ -789,20 +908,19 @@ async function getLlmsTxt(platform, owner, repo, request) {
       files = allFiles.slice(0, FILE_CAP);
     }
   } catch (e) {
-    // Return a minimal but useful response even on timeout
     return new Response([
       `# ${owner}/${repo}`,
       description ? `> ${description}` : "",
       ``,
       `## Overview`,
       `- Platform: ${platform}`,
-      `- Note: This is a large repository. File listing timed out.`,
+      `- Note: Large repository. File listing timed out.`,
       ``,
       `## How to read files`,
       `${baseUrl}/path/to/file`,
       ``,
-      `## Full file list`,
-      `${baseUrl}?view=files`,
+      `## Full context (may be slow for large repos)`,
+      `${baseUrl}/context`,
     ].filter(Boolean).join("\n"), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
   }
 
@@ -811,6 +929,24 @@ async function getLlmsTxt(platform, owner, repo, request) {
   const configFiles = files.filter(f => /\.(json|toml|yaml|yml|ini|cfg)$/.test(f));
   const docFiles = files.filter(f => /\.(md|txt|rst)$/.test(f));
   const truncated = totalFiles > FILE_CAP;
+
+  // Fetch preview of README if it exists
+  let readmePreview = "";
+  if (readmeFile) {
+    try {
+      let res;
+      if (platform === "github") {
+        res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${readmeFile}`,
+          { headers: { ...headers, "Accept": "application/vnd.github.raw+json" } });
+      } else {
+        res = await fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw/${readmeFile}`, { headers });
+      }
+      if (res.ok) {
+        const text = await res.text();
+        readmePreview = text.split("\n").slice(0, 30).join("\n");
+      }
+    } catch {}
+  }
 
   return new Response([
     `# ${owner}/${repo}`,
@@ -821,12 +957,16 @@ async function getLlmsTxt(platform, owner, repo, request) {
     `- Total files: ${totalFiles}${truncated ? ` (showing first ${FILE_CAP})` : ""}`,
     `- Code files: ${codeFiles.length}`,
     `- Docs: ${docFiles.length}`,
-    truncated ? `- Full file list: ${baseUrl}?view=files` : "",
     ``,
+    `## Quick Links`,
+    `- Full context (files + previews): ${baseUrl}/context`,
+    `- Full file list: ${baseUrl}?view=files`,
+    truncated ? `- Large repo — use /context for smart file selection` : "",
+    ``,
+    readmePreview ? `## README Preview\n\`\`\`\n${readmePreview}\n\`\`\`\n` : "",
     `## How to read files`,
     `${baseUrl}/path/to/file`,
     ``,
-    readmeFile ? `## README\n${baseUrl}/${readmeFile}\n` : "",
     docFiles.length ? `## Documentation\n${docFiles.slice(0,20).map(f => `${baseUrl}/${f}`).join("\n")}\n` : "",
     codeFiles.length ? `## Source Code (first 50)\n${codeFiles.slice(0,50).map(f => `${baseUrl}/${f}`).join("\n")}\n` : "",
     configFiles.length ? `## Config Files\n${configFiles.slice(0,10).map(f => `${baseUrl}/${f}`).join("\n")}\n` : "",
