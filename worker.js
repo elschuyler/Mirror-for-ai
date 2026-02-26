@@ -683,31 +683,32 @@ When a user asks you to read, check, analyze, or explore a GitHub or Codeberg re
       const cache = caches.default;
       const cachedResponse = await cache.match(cacheKey);
       if (cachedResponse) return cachedResponse;
-
       const response = await getContext(platform, owner, repo, request);
       const headers = new Headers(response.headers);
       headers.set("Cache-Control", "public, max-age=300");
-      const cachedRes = new Response(response.clone().body, { status: response.status, headers });
-      ctx.waitUntil(cache.put(cacheKey, cachedRes));
+      ctx.waitUntil(cache.put(cacheKey, new Response(response.clone().body, { status: response.status, headers })));
       return response;
     }
 
-    
+    const cacheKey = new Request(url.toString(), request);
+    const cache = caches.default;
+    const cachedResponse = await cache.match(cacheKey);
+    if (cachedResponse) return cachedResponse;
 
     try {
       let response;
-      if (!filePath || url.searchParams.get("view") === "files") {
-        response = await listFiles(platform, owner, repo, request);
-      } else if (filePath === "llms.txt") {
+
+      if (filePath === "llms.txt") {
         response = await getLlmsTxt(platform, owner, repo, request);
       } else {
-        response = await getFile(platform, owner, repo, filePath);
+        // Use contents API for both directory browsing and file reading
+        // It automatically returns directory listing or file content
+        response = await browseOrRead(platform, owner, repo, filePath || "", request);
       }
 
       const headers = new Headers(response.headers);
       headers.set("Cache-Control", "public, max-age=300");
-      const cachedRes = new Response(response.clone().body, { status: response.status, headers });
-      ctx.waitUntil(cache.put(cacheKey, cachedRes));
+      ctx.waitUntil(cache.put(cacheKey, new Response(response.clone().body, { status: response.status, headers })));
       return response;
 
     } catch (e) {
@@ -716,47 +717,101 @@ When a user asks you to read, check, analyze, or explore a GitHub or Codeberg re
   }
 };
 
-async function listFiles(platform, owner, repo, request) {
+async function browseOrRead(platform, owner, repo, filePath, request) {
   const headers = { "User-Agent": "mirror-for-ai/1.0" };
-  let files = [];
-  if (platform === "github") {
-    const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`, { headers });
-    if (!res.ok) throw new Error(`Repo not found or private (status ${res.status})`);
-    files = ((await res.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
-  } else {
-    const repoRes = await fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}`, { headers });
-    if (!repoRes.ok) throw new Error(`Repo not found (status ${repoRes.status})`);
-    const repoData = await repoRes.json();
-    const branchRes = await fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/branches/${repoData.default_branch}`, { headers });
-    if (!branchRes.ok) throw new Error(`Branch not found`);
-    const sha = (await branchRes.json()).commit.id;
-    const treeRes = await fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/git/trees/${sha}?recursive=true`, { headers });
-    if (!treeRes.ok) throw new Error(`Could not fetch file tree`);
-    files = ((await treeRes.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
-  }
   const host = new URL(request.url).host;
-  return new Response([
-    `# ${platform}/${owner}/${repo}`,
-    `# ${files.length} files found`,
-    `# To read a file: https://${host}/${platform}/${owner}/${repo}/path/to/file`,
-    `# AI summary: https://${host}/${platform}/${owner}/${repo}/llms.txt`,
-    ``, ...files
-  ].join("\n"), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+  const baseUrl = `https://${host}/${platform}/${owner}/${repo}`;
+  const displayPath = filePath || "(root)";
+
+  let data, isDirectory;
+
+  if (platform === "github") {
+    const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`;
+    const res = await fetch(apiUrl, { headers });
+    if (!res.ok) {
+      const status = res.status;
+      if (status === 404) throw new Error(`Not found: ${filePath || "repo root"} (status 404)`);
+      throw new Error(`GitHub API error (status ${status})`);
+    }
+    data = await res.json();
+    isDirectory = Array.isArray(data);
+
+  } else {
+    // Codeberg
+    const apiUrl = `https://codeberg.org/api/v1/repos/${owner}/${repo}/contents/${filePath}`;
+    const res = await fetch(apiUrl, { headers });
+    if (!res.ok) {
+      throw new Error(`Not found: ${filePath || "repo root"} (status ${res.status})`);
+    }
+    data = await res.json();
+    isDirectory = Array.isArray(data);
+  }
+
+  if (isDirectory) {
+    // Sort: directories first, then files, alphabetically
+    const dirs = data.filter(f => f.type === "dir").sort((a, b) => a.name.localeCompare(b.name));
+    const files = data.filter(f => f.type === "file").sort((a, b) => a.name.localeCompare(b.name));
+    const sorted = [...dirs, ...files];
+
+    const parentPath = filePath.includes("/") ? filePath.split("/").slice(0, -1).join("/") : "";
+    const parentUrl = parentPath ? `${baseUrl}/${parentPath}` : baseUrl;
+
+    const lines = [
+      `# ${platform}/${owner}/${repo}/${filePath}`,
+      `# Directory listing — ${sorted.length} items`,
+      ``,
+      `## Navigation`,
+      filePath ? `# ↑ Parent: ${parentUrl}` : `# (repo root)`,
+      `# llms.txt summary: ${baseUrl}/llms.txt`,
+      `# Full context: ${baseUrl}/context`,
+      ``,
+      `## Contents`,
+      ...sorted.map(item => {
+        const icon = item.type === "dir" ? "📁" : "📄";
+        const itemUrl = `${baseUrl}/${item.path}`;
+        const size = item.type === "file" && item.size ? ` (${formatSize(item.size)})` : "";
+        return `${icon} ${item.name}${size}\n   ${itemUrl}`;
+      })
+    ];
+
+    return new Response(lines.join("\n"), {
+      headers: { "Content-Type": "text/plain; charset=utf-8" }
+    });
+
+  } else {
+    // It's a file — return raw content
+    // GitHub returns base64 encoded content in contents API
+    if (platform === "github") {
+      if (data.encoding === "base64" && data.content) {
+        // Decode base64
+        const binary = atob(data.content.replace(/\n/g, ""));
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+        return new Response(text, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+      } else if (data.download_url) {
+        // Fall back to download_url for large files
+        const res = await fetch(data.download_url, { headers });
+        if (!res.ok) throw new Error(`Could not fetch file (status ${res.status})`);
+        return new Response(await res.text(), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+      }
+    } else {
+      // Codeberg raw content
+      const rawUrl = `https://codeberg.org/api/v1/repos/${owner}/${repo}/raw/${filePath}`;
+      const res = await fetch(rawUrl, { headers });
+      if (!res.ok) throw new Error(`Could not fetch file (status ${res.status})`);
+      return new Response(await res.text(), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+    }
+  }
 }
 
-async function getFile(platform, owner, repo, filePath) {
-  const headers = { "User-Agent": "mirror-for-ai/1.0" };
-  if (platform === "github") {
-    const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`,
-      { headers: { ...headers, "Accept": "application/vnd.github.raw+json" } });
-    if (!res.ok) throw new Error(`File not found (status ${res.status})`);
-    return new Response(await res.text(), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
-  } else {
-    const res = await fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw/${filePath}`, { headers });
-    if (!res.ok) throw new Error(`File not found (status ${res.status})`);
-    return new Response(await res.text(), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
-  }
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
+
+
 
 async function getContext(platform, owner, repo, request) {
   const headers = { "User-Agent": "mirror-for-ai/1.0" };
@@ -812,16 +867,17 @@ async function getContext(platform, owner, repo, request) {
   // Fetch file contents in parallel
   const fetchFile = async (filePath) => {
     try {
-      let res;
+      let text;
       if (platform === "github") {
-        res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`,
+        const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`,
           { headers: { ...headers, "Accept": "application/vnd.github.raw+json" } });
+        if (!res.ok) return null;
+        text = await res.text();
       } else {
-        res = await fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw/${filePath}`, { headers });
+        const res = await fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw/${filePath}`, { headers });
+        if (!res.ok) return null;
+        text = await res.text();
       }
-      if (!res.ok) return null;
-      const text = await res.text();
-      // Limit each file to first 100 lines
       const lines = text.split("\n").slice(0, 100).join("\n");
       const truncated = text.split("\n").length > 100;
       return { path: filePath, content: lines, truncated };
