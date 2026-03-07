@@ -721,7 +721,11 @@ async function browseOrRead(platform, owner, repo, filePath, request) {
   const headers = { "User-Agent": "mirror-for-ai/1.0" };
   const host = new URL(request.url).host;
   const baseUrl = `https://${host}/${platform}/${owner}/${repo}`;
-  const displayPath = filePath || "(root)";
+  const url = new URL(request.url);
+
+  // Line range params
+  const startLine = parseInt(url.searchParams.get("start")) || null;
+  const endLine = parseInt(url.searchParams.get("end")) || null;
 
   let data, isDirectory;
 
@@ -735,24 +739,18 @@ async function browseOrRead(platform, owner, repo, filePath, request) {
     }
     data = await res.json();
     isDirectory = Array.isArray(data);
-
   } else {
-    // Codeberg
     const apiUrl = `https://codeberg.org/api/v1/repos/${owner}/${repo}/contents/${filePath}`;
     const res = await fetch(apiUrl, { headers });
-    if (!res.ok) {
-      throw new Error(`Not found: ${filePath || "repo root"} (status ${res.status})`);
-    }
+    if (!res.ok) throw new Error(`Not found: ${filePath || "repo root"} (status ${res.status})`);
     data = await res.json();
     isDirectory = Array.isArray(data);
   }
 
   if (isDirectory) {
-    // Sort: directories first, then files, alphabetically
     const dirs = data.filter(f => f.type === "dir").sort((a, b) => a.name.localeCompare(b.name));
     const files = data.filter(f => f.type === "file").sort((a, b) => a.name.localeCompare(b.name));
     const sorted = [...dirs, ...files];
-
     const parentPath = filePath.includes("/") ? filePath.split("/").slice(0, -1).join("/") : "";
     const parentUrl = parentPath ? `${baseUrl}/${parentPath}` : baseUrl;
 
@@ -779,29 +777,56 @@ async function browseOrRead(platform, owner, repo, filePath, request) {
     });
 
   } else {
-    // It's a file — return raw content
-    // GitHub returns base64 encoded content in contents API
+    // Fetch raw file content
+    let text;
     if (platform === "github") {
       if (data.encoding === "base64" && data.content) {
-        // Decode base64
         const binary = atob(data.content.replace(/\n/g, ""));
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-        return new Response(text, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+        text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
       } else if (data.download_url) {
-        // Fall back to download_url for large files
         const res = await fetch(data.download_url, { headers });
         if (!res.ok) throw new Error(`Could not fetch file (status ${res.status})`);
-        return new Response(await res.text(), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+        text = await res.text();
       }
     } else {
-      // Codeberg raw content
       const rawUrl = `https://codeberg.org/api/v1/repos/${owner}/${repo}/raw/${filePath}`;
       const res = await fetch(rawUrl, { headers });
       if (!res.ok) throw new Error(`Could not fetch file (status ${res.status})`);
-      return new Response(await res.text(), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+      text = await res.text();
     }
+
+    const allLines = text.split("\n");
+    const totalLines = allLines.length;
+
+    // Apply line range if requested
+    if (startLine || endLine) {
+      const s = Math.max(1, startLine || 1);
+      const e = Math.min(totalLines, endLine || totalLines);
+      const sliced = allLines.slice(s - 1, e).join("\n");
+      const header = [
+        `# ${filePath} — lines ${s}–${e} of ${totalLines}`,
+        totalLines > e ? `# Next chunk: ${baseUrl}/${filePath}?start=${e + 1}&end=${Math.min(totalLines, e + (e - s + 1))}` : `# (end of file)`,
+        ``,
+      ].join("\n");
+      return new Response(header + sliced, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+    }
+
+    // No line range — return full file with info header if large
+    if (totalLines > 500) {
+      const header = [
+        `# ${filePath} — ${totalLines} lines total`,
+        `# This is a large file. Use ?start=1&end=200 to read in chunks:`,
+        `# ${baseUrl}/${filePath}?start=1&end=200`,
+        `# ${baseUrl}/${filePath}?start=201&end=400`,
+        `# ${baseUrl}/${filePath}?start=401&end=600`,
+        ``,
+      ].join("\n");
+      return new Response(header + text, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+    }
+
+    return new Response(text, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
   }
 }
 
@@ -812,17 +837,17 @@ function formatSize(bytes) {
 }
 
 
-
 async function getContext(platform, owner, repo, request) {
   const headers = { "User-Agent": "mirror-for-ai/1.0" };
   const host = new URL(request.url).host;
   const baseUrl = `https://${host}/${platform}/${owner}/${repo}`;
+  const url = new URL(request.url);
+  const maxFiles = Math.min(parseInt(url.searchParams.get("max")) || 20, 40); // default 20, max 40
   let files = [], description = "", defaultBranch = "main";
 
   const TIMEOUT_MS = 8000;
   const withTimeout = (p) => Promise.race([p, new Promise((_, r) => setTimeout(() => r(new Error("timeout")), TIMEOUT_MS))]);
 
-  // Fetch repo info and file tree
   try {
     if (platform === "github") {
       const repoRes = await withTimeout(fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers }));
@@ -848,23 +873,50 @@ async function getContext(platform, owner, repo, request) {
     return new Response(`Error fetching repo: ${e.message}`, { status: 500, headers: { "Content-Type": "text/plain" } });
   }
 
-  // Pick the most important files
-  const readme = files.find(f => /^readme(\.(md|txt|rst))?$/i.test(f));
-  const entryPoints = files.filter(f => /^(index|main|app|server|src\/index|src\/main|src\/app)\.(js|ts|py|go|rs|rb|php)$/.test(f));
-  const configFiles = files.filter(f => /^(package\.json|pyproject\.toml|Cargo\.toml|go\.mod|composer\.json|Gemfile|requirements\.txt|wrangler\.toml)$/.test(f));
-  const codeFiles = files.filter(f => /\.(js|ts|py|go|rs|java|cpp|c|cs|rb|php|swift|kt)$/.test(f) && !f.includes("node_modules") && !f.includes("vendor"));
-  const docFiles = files.filter(f => /\.(md|txt|rst)$/.test(f) && f !== readme);
+  // Smart file priority scoring
+  const scoreFile = (f) => {
+    let score = 0;
+    const name = f.toLowerCase();
+    const parts = f.split("/");
+    const depth = parts.length - 1;
+    const basename = parts[parts.length - 1].toLowerCase();
 
-  // Priority order for fetching content
-  const toFetch = [
-    readme,
-    ...entryPoints,
-    ...configFiles,
-    ...codeFiles.slice(0, 8),
-    ...docFiles.slice(0, 3)
-  ].filter(Boolean).slice(0, 15); // max 15 files
+    // Penalise deep nesting and build/vendor dirs
+    if (f.includes("node_modules") || f.includes("vendor") || f.includes("dist/") || f.includes("build/")) return -1;
+    score -= depth * 2;
 
-  // Fetch file contents in parallel
+    // README is most important
+    if (/^readme(\.(md|txt|rst))?$/i.test(f)) score += 100;
+
+    // Entry points
+    if (/^(index|main|app|server)\.(js|ts|py|go|rs|rb|php|kt|swift)$/.test(f)) score += 80;
+    if (/^src\/(index|main|app)\.(js|ts|py|go|rs)$/.test(f)) score += 75;
+
+    // Config files
+    if (/^(package\.json|wrangler\.toml|pyproject\.toml|Cargo\.toml|go\.mod|composer\.json|Gemfile|requirements\.txt|\.env\.example)$/.test(f)) score += 60;
+
+    // Source code files
+    if (/\.(js|ts|py|go|rs|java|cpp|c|cs|rb|php|swift|kt|html|css)$/.test(f)) score += 20;
+
+    // Docs
+    if (/\.(md|txt|rst)$/.test(f)) score += 10;
+
+    // Shorter paths (closer to root) score higher
+    if (depth === 0) score += 15;
+    if (depth === 1) score += 8;
+
+    return score;
+  };
+
+  const scoredFiles = files
+    .map(f => ({ path: f, score: scoreFile(f) }))
+    .filter(f => f.score >= 0)
+    .sort((a, b) => b.score - a.score);
+
+  const toFetch = scoredFiles.slice(0, maxFiles).map(f => f.path);
+
+  // Fetch file contents in parallel with per-file line cap
+  const LINE_CAP = 150;
   const fetchFile = async (filePath) => {
     try {
       let text;
@@ -878,9 +930,14 @@ async function getContext(platform, owner, repo, request) {
         if (!res.ok) return null;
         text = await res.text();
       }
-      const lines = text.split("\n").slice(0, 100).join("\n");
-      const truncated = text.split("\n").length > 100;
-      return { path: filePath, content: lines, truncated };
+      const allLines = text.split("\n");
+      const truncated = allLines.length > LINE_CAP;
+      return {
+        path: filePath,
+        content: allLines.slice(0, LINE_CAP).join("\n"),
+        totalLines: allLines.length,
+        truncated
+      };
     } catch {
       return null;
     }
@@ -888,33 +945,30 @@ async function getContext(platform, owner, repo, request) {
 
   const fileContents = await Promise.all(toFetch.map(fetchFile));
 
-  // Build context document
   const sections = [
-    `# ${owner}/${repo} — Full Context`,
+    `# ${owner}/${repo} — Context`,
     description ? `> ${description}` : "",
     ``,
     `## Repository Overview`,
     `- Platform: ${platform}`,
     `- Total files: ${files.length}`,
-    `- Entry points: ${entryPoints.length}`,
-    `- Source files: ${codeFiles.length}`,
+    `- Files included below: ${toFetch.length} (highest priority)`,
+    `- To read more files: ${baseUrl}/path/to/file`,
+    `- To read large files in chunks: ${baseUrl}/path/to/file?start=1&end=200`,
+    `- Full file list: ${baseUrl}?view=files`,
     ``,
-    `## Complete File List`,
+    `## All Files`,
     files.join("\n"),
     ``,
     `## File Contents`,
-    `> The most important files are included below. For other files use: ${baseUrl}/path/to/file`,
-    ``,
   ];
 
   for (const file of fileContents) {
     if (!file) continue;
-    sections.push(`### ${file.path}`);
-    sections.push(`\`\`\``);
+    sections.push(`\n### ${file.path}${file.truncated ? ` (first ${LINE_CAP} of ${file.totalLines} lines — full file: ${baseUrl}/${file.path})` : ""}`);
+    sections.push("```");
     sections.push(file.content);
-    if (file.truncated) sections.push(`... (truncated, full file at ${baseUrl}/${file.path})`);
-    sections.push(`\`\`\``);
-    sections.push(``);
+    sections.push("```");
   }
 
   return new Response(sections.filter(s => s !== null).join("\n"), {
