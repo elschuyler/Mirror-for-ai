@@ -781,14 +781,26 @@ async function browseOrRead(platform, owner, repo, filePath, request) {
     let text;
     if (platform === "github") {
       if (data.encoding === "base64" && data.content) {
+        // Normal case — file under 1MB
         const binary = atob(data.content.replace(/\n/g, ""));
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
         text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+      } else if (data.sha) {
+        // File over 1MB — Contents API won't return content
+        // Use Git Blobs API which handles files up to 100MB
+        const blobRes = await fetch(
+          `https://api.github.com/repos/${owner}/${repo}/git/blobs/${data.sha}`,
+          { headers: { ...headers, "Accept": "application/vnd.github.raw+json" } }
+        );
+        if (!blobRes.ok) throw new Error(`Could not fetch large file via Blobs API (status ${blobRes.status})`);
+        text = await blobRes.text();
       } else if (data.download_url) {
         const res = await fetch(data.download_url, { headers });
         if (!res.ok) throw new Error(`Could not fetch file (status ${res.status})`);
         text = await res.text();
+      } else {
+        throw new Error(`File content unavailable`);
       }
     } else {
       const rawUrl = `https://codeberg.org/api/v1/repos/${owner}/${repo}/raw/${filePath}`;
