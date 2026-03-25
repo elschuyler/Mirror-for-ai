@@ -2,6 +2,13 @@
 const RATE_LIMIT_PER_MINUTE = 60;
 const RATE_LIMIT_PER_DAY = 1000;
 
+// --- PROXY CONFIGURATION ---
+const PROXY_CONFIG = {
+  "claude": "https://api.anthropic.com/v1",
+  "gemini": "https://generativelanguage.googleapis.com/v1beta",
+  "openai": "https://api.openai.com/v1"
+};
+
 async function checkRateLimit(request) {
   const ip = request.headers.get("CF-Connecting-IP") || "unknown";
   const now = new Date();
@@ -12,15 +19,25 @@ async function checkRateLimit(request) {
   const minuteKey = new Request(`https://rate-limit-store/minute/${ip}/${minute}`);
   const dayKey = new Request(`https://rate-limit-store/day/${ip}/${day}`);
 
-  const [minuteRes, dayRes] = await Promise.all([cache.match(minuteKey), cache.match(dayKey)]);
+  const [minuteRes, dayRes] = await Promise.all([
+    cache.match(minuteKey), 
+    cache.match(dayKey)
+  ]);
+  
   const minuteCount = minuteRes ? parseInt(await minuteRes.text()) : 0;
   const dayCount = dayRes ? parseInt(await dayRes.text()) : 0;
 
   if (minuteCount >= RATE_LIMIT_PER_MINUTE) {
-    return { limited: true, reason: `Rate limit exceeded: max ${RATE_LIMIT_PER_MINUTE} requests per minute.` };
+    return { 
+      limited: true, 
+      reason: `Rate limit exceeded: max ${RATE_LIMIT_PER_MINUTE} requests per minute.` 
+    };
   }
   if (dayCount >= RATE_LIMIT_PER_DAY) {
-    return { limited: true, reason: `Rate limit exceeded: max ${RATE_LIMIT_PER_DAY} requests per day.` };
+    return { 
+      limited: true, 
+      reason: `Rate limit exceeded: max ${RATE_LIMIT_PER_DAY} requests per day.` 
+    };
   }
 
   // Increment counters
@@ -368,8 +385,33 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    // --- AI PROXY ROUTING ---
+    if (path.startsWith("/v1/proxy")) {
+      return await handleAIProxy(request, env);
+    }
+
+    // --- AGENT TOOL MANIFEST ---
+    if (path === "/tool-manifest.json") {
+      return new Response(JSON.stringify({
+        schema_version: "v1",
+        name: "Mirror-Agent-Node",
+        description: "Unified Repo & AI Gateway",
+        tools: {
+          mirror: `https://${url.host}/mcp`,
+          proxy: `https://${url.host}/v1/proxy`
+        }
+      }), { 
+        headers: { 
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*" 
+        } 
+      });
+    }
+
     if (path === "/" || path === "") {
-      return new Response(HOMEPAGE, { headers: { "Content-Type": "text/html" } });
+      return new Response(HOMEPAGE, { 
+        headers: { "Content-Type": "text/html" } 
+      });
     }
 
     // MCP (Model Context Protocol) endpoint
@@ -395,7 +437,10 @@ export default {
           description: "Read-only mirror of public GitHub and Codeberg repositories",
           protocol: "mcp/1.0"
         }, null, 2), {
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+          headers: { 
+            "Content-Type": "application/json", 
+            "Access-Control-Allow-Origin": "*" 
+          }
         });
       }
 
@@ -418,9 +463,19 @@ export default {
                 inputSchema: {
                   type: "object",
                   properties: {
-                    platform: { type: "string", enum: ["github", "codeberg"], description: "The platform hosting the repo" },
-                    owner: { type: "string", description: "Repository owner or organization" },
-                    repo: { type: "string", description: "Repository name" }
+                    platform: { 
+                      type: "string", 
+                      enum: ["github", "codeberg"], 
+                      description: "The platform hosting the repo" 
+                    },
+                    owner: { 
+                      type: "string", 
+                      description: "Repository owner or organization" 
+                    },
+                    repo: { 
+                      type: "string", 
+                      description: "Repository name" 
+                    }
                   },
                   required: ["platform", "owner", "repo"]
                 }
@@ -434,7 +489,10 @@ export default {
                     platform: { type: "string", enum: ["github", "codeberg"] },
                     owner: { type: "string" },
                     repo: { type: "string" },
-                    path: { type: "string", description: "Path to the file within the repository" }
+                    path: { 
+                      type: "string", 
+                      description: "Path to the file within the repository" 
+                    }
                   },
                   required: ["platform", "owner", "repo", "path"]
                 }
@@ -462,19 +520,29 @@ export default {
 
           try {
             let text;
-            const fakeRequest = new Request(`https://${host}/${args.platform}/${args.owner}/${args.repo}`);
+            const fakeRequest = new Request(
+              `https://${host}/${args.platform}/${args.owner}/${args.repo}`
+            );
 
             if (name === "list_files") {
-              const res = await listFiles(args.platform, args.owner, args.repo, fakeRequest);
+              const res = await listFiles(
+                args.platform, args.owner, args.repo, fakeRequest
+              );
               text = await res.text();
             } else if (name === "get_summary") {
-              const res = await getLlmsTxt(args.platform, args.owner, args.repo, fakeRequest);
+              const res = await getLlmsTxt(
+                args.platform, args.owner, args.repo, fakeRequest
+              );
               text = await res.text();
             } else if (name === "get_context") {
-              const res = await getContext(args.platform, args.owner, args.repo, fakeRequest);
+              const res = await getContext(
+                args.platform, args.owner, args.repo, fakeRequest
+              );
               text = await res.text();
             } else if (name === "read_file") {
-              const res = await getFile(args.platform, args.owner, args.repo, args.path);
+              const res = await getFile(
+                args.platform, args.owner, args.repo, args.path
+              );
               text = await res.text();
             } else {
               return mcpError(-32601, `Unknown tool: ${name}`, id);
@@ -522,7 +590,10 @@ export default {
         legal_info_url: `https://${host}`
       };
       return new Response(JSON.stringify(manifest, null, 2), {
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+        headers: { 
+          "Content-Type": "application/json", 
+          "Access-Control-Allow-Origin": "*" 
+        }
       });
     }
 
@@ -593,7 +664,10 @@ export default {
         }
       };
       return new Response(JSON.stringify(spec, null, 2), {
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+        headers: { 
+          "Content-Type": "application/json", 
+          "Access-Control-Allow-Origin": "*" 
+        }
       });
     }
 
@@ -640,7 +714,9 @@ When a user asks you to read, check, analyze, or explore a GitHub or Codeberg re
 - https://${host}/github/torvalds/linux/README — read the README file
 - https://${host}/github/torvalds/linux/llms.txt — AI summary of the Linux kernel repo
 `;
-      return new Response(llmsTxt, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+      return new Response(llmsTxt, { 
+        headers: { "Content-Type": "text/plain; charset=utf-8" } 
+      });
     }
 
     const parts = path.split("/").filter(Boolean);
@@ -660,7 +736,9 @@ When a user asks you to read, check, analyze, or explore a GitHub or Codeberg re
     // Rate limit check
     const rateCheck = await checkRateLimit(request);
     if (rateCheck.limited) {
-      return new Response(`429 Too Many Requests\n\n${rateCheck.reason}\n\nPlease slow down and try again shortly.`, {
+      return new Response(
+        `429 Too Many Requests\n\n${rateCheck.reason}\n\n` + 
+        `Please slow down and try again shortly.`, {
         status: 429,
         headers: {
           "Content-Type": "text/plain",
@@ -683,10 +761,17 @@ When a user asks you to read, check, analyze, or explore a GitHub or Codeberg re
       const cache = caches.default;
       const cachedResponse = await cache.match(cacheKey);
       if (cachedResponse) return cachedResponse;
+      
       const response = await getContext(platform, owner, repo, request);
       const headers = new Headers(response.headers);
       headers.set("Cache-Control", "public, max-age=300");
-      ctx.waitUntil(cache.put(cacheKey, new Response(response.clone().body, { status: response.status, headers })));
+      
+      ctx.waitUntil(
+        cache.put(cacheKey, new Response(
+          response.clone().body, 
+          { status: response.status, headers }
+        ))
+      );
       return response;
     }
 
@@ -701,21 +786,70 @@ When a user asks you to read, check, analyze, or explore a GitHub or Codeberg re
       if (filePath === "llms.txt") {
         response = await getLlmsTxt(platform, owner, repo, request);
       } else {
-        // Use contents API for both directory browsing and file reading
-        // It automatically returns directory listing or file content
-        response = await browseOrRead(platform, owner, repo, filePath || "", request);
+        response = await browseOrRead(
+          platform, owner, repo, filePath || "", request
+        );
       }
 
       const headers = new Headers(response.headers);
       headers.set("Cache-Control", "public, max-age=300");
-      ctx.waitUntil(cache.put(cacheKey, new Response(response.clone().body, { status: response.status, headers })));
+      
+      ctx.waitUntil(
+        cache.put(cacheKey, new Response(
+          response.clone().body, 
+          { status: response.status, headers }
+        ))
+      );
       return response;
 
     } catch (e) {
-      return new Response(`Error: ${e.message}`, { status: 500, headers: { "Content-Type": "text/plain" } });
+      return new Response(`Error: ${e.message}`, { 
+        status: 500, headers: { "Content-Type": "text/plain" } 
+      });
     }
   }
 };
+
+// --- PROXY HANDLER ---
+async function handleAIProxy(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch (err) {
+    return new Response(JSON.stringify({ 
+      error: "Invalid JSON body for proxy request" 
+    }), { status: 400 });
+  }
+
+  const model = body.model || "";
+  let targetUrl = "";
+  let apiKey = "";
+
+  if (model.includes("claude")) {
+    targetUrl = PROXY_CONFIG.claude + "/messages";
+    apiKey = env.ANTHROPIC_API_KEY;
+  } else if (model.includes("gemini")) {
+    targetUrl = PROXY_CONFIG.gemini + "/models/" + 
+                model + ":generateContent";
+    apiKey = env.GOOGLE_API_KEY;
+  } else {
+    return new Response(JSON.stringify({ 
+      error: `Unsupported model proxy routing: ${model}` 
+    }), { status: 400 });
+  }
+
+  const response = await fetch(targetUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey, 
+      "Authorization": `Bearer ${apiKey}` 
+    },
+    body: JSON.stringify(body)
+  });
+
+  return new Response(response.body, response);
+}
 
 async function browseOrRead(platform, owner, repo, filePath, request) {
   const headers = { "User-Agent": "mirror-for-ai/1.0" };
@@ -723,7 +857,6 @@ async function browseOrRead(platform, owner, repo, filePath, request) {
   const baseUrl = `https://${host}/${platform}/${owner}/${repo}`;
   const url = new URL(request.url);
 
-  // Line range params
   const startLine = parseInt(url.searchParams.get("start")) || null;
   const endLine = parseInt(url.searchParams.get("end")) || null;
 
@@ -734,7 +867,9 @@ async function browseOrRead(platform, owner, repo, filePath, request) {
     const res = await fetch(apiUrl, { headers });
     if (!res.ok) {
       const status = res.status;
-      if (status === 404) throw new Error(`Not found: ${filePath || "repo root"} (status 404)`);
+      if (status === 404) {
+        throw new Error(`Not found: ${filePath || "repo root"} (status 404)`);
+      }
       throw new Error(`GitHub API error (status ${status})`);
     }
     data = await res.json();
@@ -742,16 +877,24 @@ async function browseOrRead(platform, owner, repo, filePath, request) {
   } else {
     const apiUrl = `https://codeberg.org/api/v1/repos/${owner}/${repo}/contents/${filePath}`;
     const res = await fetch(apiUrl, { headers });
-    if (!res.ok) throw new Error(`Not found: ${filePath || "repo root"} (status ${res.status})`);
+    if (!res.ok) {
+      throw new Error(`Not found: ${filePath || "repo root"} (status ${res.status})`);
+    }
     data = await res.json();
     isDirectory = Array.isArray(data);
   }
 
   if (isDirectory) {
-    const dirs = data.filter(f => f.type === "dir").sort((a, b) => a.name.localeCompare(b.name));
-    const files = data.filter(f => f.type === "file").sort((a, b) => a.name.localeCompare(b.name));
+    const dirs = data
+      .filter(f => f.type === "dir")
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const files = data
+      .filter(f => f.type === "file")
+      .sort((a, b) => a.name.localeCompare(b.name));
     const sorted = [...dirs, ...files];
-    const parentPath = filePath.includes("/") ? filePath.split("/").slice(0, -1).join("/") : "";
+    const parentPath = filePath.includes("/") 
+      ? filePath.split("/").slice(0, -1).join("/") 
+      : "";
     const parentUrl = parentPath ? `${baseUrl}/${parentPath}` : baseUrl;
 
     const lines = [
@@ -767,7 +910,9 @@ async function browseOrRead(platform, owner, repo, filePath, request) {
       ...sorted.map(item => {
         const icon = item.type === "dir" ? "📁" : "📄";
         const itemUrl = `${baseUrl}/${item.path}`;
-        const size = item.type === "file" && item.size ? ` (${formatSize(item.size)})` : "";
+        const size = item.type === "file" && item.size 
+          ? ` (${formatSize(item.size)})` 
+          : "";
         return `${icon} ${item.name}${size}\n   ${itemUrl}`;
       })
     ];
@@ -777,27 +922,32 @@ async function browseOrRead(platform, owner, repo, filePath, request) {
     });
 
   } else {
-    // Fetch raw file content
     let text;
     if (platform === "github") {
       if (data.encoding === "base64" && data.content) {
-        // Normal case — file under 1MB
         const binary = atob(data.content.replace(/\n/g, ""));
         const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
         text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
       } else if (data.sha) {
-        // File over 1MB — Contents API won't return content
-        // Use Git Blobs API which handles files up to 100MB
         const blobRes = await fetch(
           `https://api.github.com/repos/${owner}/${repo}/git/blobs/${data.sha}`,
-          { headers: { ...headers, "Accept": "application/vnd.github.raw+json" } }
+          { headers: { 
+            ...headers, 
+            "Accept": "application/vnd.github.raw+json" 
+          } }
         );
-        if (!blobRes.ok) throw new Error(`Could not fetch large file via Blobs API (status ${blobRes.status})`);
+        if (!blobRes.ok) {
+          throw new Error(`Could not fetch large file via Blobs API (status ${blobRes.status})`);
+        }
         text = await blobRes.text();
       } else if (data.download_url) {
         const res = await fetch(data.download_url, { headers });
-        if (!res.ok) throw new Error(`Could not fetch file (status ${res.status})`);
+        if (!res.ok) {
+          throw new Error(`Could not fetch file (status ${res.status})`);
+        }
         text = await res.text();
       } else {
         throw new Error(`File content unavailable`);
@@ -805,27 +955,31 @@ async function browseOrRead(platform, owner, repo, filePath, request) {
     } else {
       const rawUrl = `https://codeberg.org/api/v1/repos/${owner}/${repo}/raw/${filePath}`;
       const res = await fetch(rawUrl, { headers });
-      if (!res.ok) throw new Error(`Could not fetch file (status ${res.status})`);
+      if (!res.ok) {
+        throw new Error(`Could not fetch file (status ${res.status})`);
+      }
       text = await res.text();
     }
 
     const allLines = text.split("\n");
     const totalLines = allLines.length;
 
-    // Apply line range if requested
     if (startLine || endLine) {
       const s = Math.max(1, startLine || 1);
       const e = Math.min(totalLines, endLine || totalLines);
       const sliced = allLines.slice(s - 1, e).join("\n");
       const header = [
         `# ${filePath} — lines ${s}–${e} of ${totalLines}`,
-        totalLines > e ? `# Next chunk: ${baseUrl}/${filePath}?start=${e + 1}&end=${Math.min(totalLines, e + (e - s + 1))}` : `# (end of file)`,
+        totalLines > e 
+          ? `# Next chunk: ${baseUrl}/${filePath}?start=${e + 1}&end=${Math.min(totalLines, e + (e - s + 1))}` 
+          : `# (end of file)`,
         ``,
       ].join("\n");
-      return new Response(header + sliced, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+      return new Response(header + sliced, { 
+        headers: { "Content-Type": "text/plain; charset=utf-8" } 
+      });
     }
 
-    // No line range — return full file with info header if large
     if (totalLines > 500) {
       const header = [
         `# ${filePath} — ${totalLines} lines total`,
@@ -835,10 +989,14 @@ async function browseOrRead(platform, owner, repo, filePath, request) {
         `# ${baseUrl}/${filePath}?start=401&end=600`,
         ``,
       ].join("\n");
-      return new Response(header + text, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+      return new Response(header + text, { 
+        headers: { "Content-Type": "text/plain; charset=utf-8" } 
+      });
     }
 
-    return new Response(text, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+    return new Response(text, { 
+      headers: { "Content-Type": "text/plain; charset=utf-8" } 
+    });
   }
 }
 
@@ -848,17 +1006,19 @@ function formatSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
-
 async function getContext(platform, owner, repo, request) {
   const headers = { "User-Agent": "mirror-for-ai/1.0" };
   const host = new URL(request.url).host;
   const baseUrl = `https://${host}/${platform}/${owner}/${repo}`;
   const url = new URL(request.url);
-  const maxFiles = Math.min(parseInt(url.searchParams.get("max")) || 20, 40); // default 20, max 40
+  const maxFiles = Math.min(parseInt(url.searchParams.get("max")) || 20, 40);
   let files = [], description = "", defaultBranch = "main";
 
   const TIMEOUT_MS = 8000;
-  const withTimeout = (p) => Promise.race([p, new Promise((_, r) => setTimeout(() => r(new Error("timeout")), TIMEOUT_MS))]);
+  const withTimeout = (p) => Promise.race([
+    p, 
+    new Promise((_, r) => setTimeout(() => r(new Error("timeout")), TIMEOUT_MS))
+  ]);
 
   try {
     if (platform === "github") {
@@ -867,53 +1027,57 @@ async function getContext(platform, owner, repo, request) {
       const repoData = await repoRes.json();
       description = repoData.description || "";
       defaultBranch = repoData.default_branch || "main";
-      const treeRes = await withTimeout(fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`, { headers }));
+      
+      const treeRes = await withTimeout(fetch(
+        `https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`, 
+        { headers }
+      ));
       if (!treeRes.ok) throw new Error(`Could not fetch file tree`);
-      files = ((await treeRes.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
+      files = ((await treeRes.json()).tree || [])
+        .filter(f => f.type === "blob")
+        .map(f => f.path);
     } else {
       const repoRes = await withTimeout(fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}`, { headers }));
       if (!repoRes.ok) throw new Error(`Repo not found`);
       const repoData = await repoRes.json();
       description = repoData.description || "";
       defaultBranch = repoData.default_branch || "main";
-      const branchRes = await withTimeout(fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/branches/${defaultBranch}`, { headers }));
+      
+      const branchRes = await withTimeout(fetch(
+        `https://codeberg.org/api/v1/repos/${owner}/${repo}/branches/${defaultBranch}`, 
+        { headers }
+      ));
       const sha = (await branchRes.json()).commit.id;
-      const treeRes = await withTimeout(fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/git/trees/${sha}?recursive=true`, { headers }));
-      files = ((await treeRes.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
+      
+      const treeRes = await withTimeout(fetch(
+        `https://codeberg.org/api/v1/repos/${owner}/${repo}/git/trees/${sha}?recursive=true`, 
+        { headers }
+      ));
+      files = ((await treeRes.json()).tree || [])
+        .filter(f => f.type === "blob")
+        .map(f => f.path);
     }
   } catch (e) {
-    return new Response(`Error fetching repo: ${e.message}`, { status: 500, headers: { "Content-Type": "text/plain" } });
+    return new Response(`Error fetching repo: ${e.message}`, { 
+      status: 500, headers: { "Content-Type": "text/plain" } 
+    });
   }
 
-  // Smart file priority scoring
   const scoreFile = (f) => {
     let score = 0;
-    const name = f.toLowerCase();
     const parts = f.split("/");
     const depth = parts.length - 1;
-    const basename = parts[parts.length - 1].toLowerCase();
 
-    // Penalise deep nesting and build/vendor dirs
-    if (f.includes("node_modules") || f.includes("vendor") || f.includes("dist/") || f.includes("build/")) return -1;
+    if (f.includes("node_modules") || f.includes("vendor") || 
+        f.includes("dist/") || f.includes("build/")) return -1;
     score -= depth * 2;
 
-    // README is most important
     if (/^readme(\.(md|txt|rst))?$/i.test(f)) score += 100;
-
-    // Entry points
     if (/^(index|main|app|server)\.(js|ts|py|go|rs|rb|php|kt|swift)$/.test(f)) score += 80;
     if (/^src\/(index|main|app)\.(js|ts|py|go|rs)$/.test(f)) score += 75;
-
-    // Config files
     if (/^(package\.json|wrangler\.toml|pyproject\.toml|Cargo\.toml|go\.mod|composer\.json|Gemfile|requirements\.txt|\.env\.example)$/.test(f)) score += 60;
-
-    // Source code files
     if (/\.(js|ts|py|go|rs|java|cpp|c|cs|rb|php|swift|kt|html|css)$/.test(f)) score += 20;
-
-    // Docs
     if (/\.(md|txt|rst)$/.test(f)) score += 10;
-
-    // Shorter paths (closer to root) score higher
     if (depth === 0) score += 15;
     if (depth === 1) score += 8;
 
@@ -926,19 +1090,26 @@ async function getContext(platform, owner, repo, request) {
     .sort((a, b) => b.score - a.score);
 
   const toFetch = scoredFiles.slice(0, maxFiles).map(f => f.path);
-
-  // Fetch file contents in parallel with per-file line cap
   const LINE_CAP = 150;
+
   const fetchFile = async (filePath) => {
     try {
       let text;
       if (platform === "github") {
-        const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`,
-          { headers: { ...headers, "Accept": "application/vnd.github.raw+json" } });
+        const res = await fetch(
+          `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`,
+          { headers: { 
+            ...headers, 
+            "Accept": "application/vnd.github.raw+json" 
+          } }
+        );
         if (!res.ok) return null;
         text = await res.text();
       } else {
-        const res = await fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw/${filePath}`, { headers });
+        const res = await fetch(
+          `https://codeberg.org/api/v1/repos/${owner}/${repo}/raw/${filePath}`, 
+          { headers }
+        );
         if (!res.ok) return null;
         text = await res.text();
       }
@@ -977,7 +1148,10 @@ async function getContext(platform, owner, repo, request) {
 
   for (const file of fileContents) {
     if (!file) continue;
-    sections.push(`\n### ${file.path}${file.truncated ? ` (first ${LINE_CAP} of ${file.totalLines} lines — full file: ${baseUrl}/${file.path})` : ""}`);
+    sections.push(
+      `\n### ${file.path}${file.truncated ? 
+      ` (first ${LINE_CAP} of ${file.totalLines} lines — full file: ${baseUrl}/${file.path})` : ""}`
+    );
     sections.push("```");
     sections.push(file.content);
     sections.push("```");
@@ -1009,9 +1183,16 @@ async function getLlmsTxt(platform, owner, repo, request) {
       const repoData = await repoRes.json();
       description = repoData.description || "";
       defaultBranch = repoData.default_branch || "main";
-      const treeRes = await withTimeout(fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`, { headers }));
+      
+      const treeRes = await withTimeout(fetch(
+        `https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`, 
+        { headers }
+      ));
       if (!treeRes.ok) throw new Error(`Could not fetch file tree`);
-      const allFiles = ((await treeRes.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
+      
+      const allFiles = ((await treeRes.json()).tree || [])
+        .filter(f => f.type === "blob")
+        .map(f => f.path);
       totalFiles = allFiles.length;
       files = allFiles.slice(0, FILE_CAP);
     } else {
@@ -1020,12 +1201,23 @@ async function getLlmsTxt(platform, owner, repo, request) {
       const repoData = await repoRes.json();
       description = repoData.description || "";
       defaultBranch = repoData.default_branch || "main";
-      const branchRes = await withTimeout(fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/branches/${defaultBranch}`, { headers }));
+      
+      const branchRes = await withTimeout(fetch(
+        `https://codeberg.org/api/v1/repos/${owner}/${repo}/branches/${defaultBranch}`, 
+        { headers }
+      ));
       if (!branchRes.ok) throw new Error(`Branch not found`);
       const sha = (await branchRes.json()).commit.id;
-      const treeRes = await withTimeout(fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/git/trees/${sha}?recursive=true`, { headers }));
+      
+      const treeRes = await withTimeout(fetch(
+        `https://codeberg.org/api/v1/repos/${owner}/${repo}/git/trees/${sha}?recursive=true`, 
+        { headers }
+      ));
       if (!treeRes.ok) throw new Error(`Could not fetch file tree`);
-      const allFiles = ((await treeRes.json()).tree || []).filter(f => f.type === "blob").map(f => f.path);
+      
+      const allFiles = ((await treeRes.json()).tree || [])
+        .filter(f => f.type === "blob")
+        .map(f => f.path);
       totalFiles = allFiles.length;
       files = allFiles.slice(0, FILE_CAP);
     }
@@ -1043,25 +1235,42 @@ async function getLlmsTxt(platform, owner, repo, request) {
       ``,
       `## Full context (may be slow for large repos)`,
       `${baseUrl}/context`,
-    ].filter(Boolean).join("\n"), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+    ].filter(Boolean).join("\n"), { 
+      headers: { "Content-Type": "text/plain; charset=utf-8" } 
+    });
   }
 
-  const readmeFile = files.find(f => f.toLowerCase() === "readme.md" || f.toLowerCase() === "readme");
-  const codeFiles = files.filter(f => /\.(js|ts|py|go|rs|java|cpp|c|cs|rb|php|swift|kt)$/.test(f));
-  const configFiles = files.filter(f => /\.(json|toml|yaml|yml|ini|cfg)$/.test(f));
-  const docFiles = files.filter(f => /\.(md|txt|rst)$/.test(f));
+  const readmeFile = files.find(f => 
+    f.toLowerCase() === "readme.md" || f.toLowerCase() === "readme"
+  );
+  const codeFiles = files.filter(f => 
+    /\.(js|ts|py|go|rs|java|cpp|c|cs|rb|php|swift|kt)$/.test(f)
+  );
+  const configFiles = files.filter(f => 
+    /\.(json|toml|yaml|yml|ini|cfg)$/.test(f)
+  );
+  const docFiles = files.filter(f => 
+    /\.(md|txt|rst)$/.test(f)
+  );
   const truncated = totalFiles > FILE_CAP;
 
-  // Fetch preview of README if it exists
   let readmePreview = "";
   if (readmeFile) {
     try {
       let res;
       if (platform === "github") {
-        res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${readmeFile}`,
-          { headers: { ...headers, "Accept": "application/vnd.github.raw+json" } });
+        res = await fetch(
+          `https://api.github.com/repos/${owner}/${repo}/contents/${readmeFile}`,
+          { headers: { 
+            ...headers, 
+            "Accept": "application/vnd.github.raw+json" 
+          } }
+        );
       } else {
-        res = await fetch(`https://codeberg.org/api/v1/repos/${owner}/${repo}/raw/${readmeFile}`, { headers });
+        res = await fetch(
+          `https://codeberg.org/api/v1/repos/${owner}/${repo}/raw/${readmeFile}`, 
+          { headers }
+        );
       }
       if (res.ok) {
         const text = await res.text();
@@ -1092,18 +1301,29 @@ async function getLlmsTxt(platform, owner, repo, request) {
     docFiles.length ? `## Documentation\n${docFiles.slice(0,20).map(f => `${baseUrl}/${f}`).join("\n")}\n` : "",
     codeFiles.length ? `## Source Code (first 50)\n${codeFiles.slice(0,50).map(f => `${baseUrl}/${f}`).join("\n")}\n` : "",
     configFiles.length ? `## Config Files\n${configFiles.slice(0,10).map(f => `${baseUrl}/${f}`).join("\n")}\n` : "",
-  ].filter(Boolean).join("\n"), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+  ].filter(Boolean).join("\n"), { 
+    headers: { "Content-Type": "text/plain; charset=utf-8" } 
+  });
 }
 
 function mcpResult(result, id) {
   return new Response(JSON.stringify({ jsonrpc: "2.0", result, id }), {
-    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+    headers: { 
+      "Content-Type": "application/json", 
+      "Access-Control-Allow-Origin": "*" 
+    }
   });
 }
 
 function mcpError(code, message, id) {
-  return new Response(JSON.stringify({ jsonrpc: "2.0", error: { code, message }, id }), {
+  return new Response(JSON.stringify({ 
+    jsonrpc: "2.0", 
+    error: { code, message }, id 
+  }), {
     status: 400,
-    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+    headers: { 
+      "Content-Type": "application/json", 
+      "Access-Control-Allow-Origin": "*" 
+    }
   });
-}
+      }
