@@ -1,3 +1,7 @@
 name = "mirror-for-ai"
 main = "worker.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2024-03-25"
+
+[[kv_namespaces]]
+binding = "AGENT_MEMORY"
+id = "PASTE_YOUR_ID_HERE"
