@@ -385,6 +385,25 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    // --- DIGITAL BOUNCER (Security Gate) ---
+    // Sensitive paths require the X-Mirror-Auth header.
+    const securePaths = ["/v1/proxy", "/mcp"];
+    const isSecurePath = securePaths.some(p => path.startsWith(p));
+
+    // Allow OPTIONS through for CORS preflight, otherwise check auth
+    if (isSecurePath && request.method !== "OPTIONS") {
+      const authHeader = request.headers.get("X-Mirror-Auth");
+      if (authHeader !== env.AUTH_TOKEN) {
+        return new Response("Unauthorized Access: Node Locked", { 
+          status: 401,
+          headers: { 
+            "Content-Type": "text/plain", 
+            "Access-Control-Allow-Origin": "*" 
+          }
+        });
+      }
+    }
+
     // --- AI PROXY ROUTING ---
     if (path.startsWith("/v1/proxy")) {
       return await handleAIProxy(request, env);
@@ -422,7 +441,7 @@ export default {
           headers: {
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type"
+            "Access-Control-Allow-Headers": "Content-Type, X-Mirror-Auth"
           }
         });
       }
@@ -1326,4 +1345,4 @@ function mcpError(code, message, id) {
       "Access-Control-Allow-Origin": "*" 
     }
   });
-      }
+    }
